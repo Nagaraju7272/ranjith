@@ -59,10 +59,14 @@ jobs:
           script: |
             set -e
 
-            mkdir -p ~/deploy-this
+            export HOME="${HOME:-/home/${USER:-ubuntu}}"
+            mkdir -p "$HOME"
+            cd "$HOME"
+
+            mkdir -p "$HOME/deploy-this"
 
             echo "Extracting artifact..."
-            tar -xzf ~/deploy-${{ github.run_id }}.tar.gz -C ~/deploy-this
+            tar -xzf "$HOME/deploy-${{ github.run_id }}.tar.gz" -C "$HOME/deploy-this"
 
             # Install Node if missing
             if ! command -v node >/dev/null 2>&1; then
@@ -88,12 +92,12 @@ jobs:
               pm2 delete deploy-this || true
             fi
 
-            # Install dependencies
-            cd ~/deploy-this/server
+            # Install dependencies from a guaranteed-valid working directory
+            cd "$HOME/deploy-this/server"
             npm ci --production
 
-            # Start with explicit port and no stale process left behind
-            PORT=5000 pm2 start index.js --name deploy-this --watch false
+            # Start with explicit working directory to avoid pm2 uv_cwd errors
+            PORT=5000 pm2 start index.js --name deploy-this --cwd "$HOME/deploy-this/server" --watch false
 
             pm2 save
             sudo pm2 startup systemd -u $USER --hp $HOME || true
