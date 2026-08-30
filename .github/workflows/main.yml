@@ -48,7 +48,19 @@ jobs:
           script: |
             set -e
             mkdir -p ~/deploy-this
-            tar -xzf ~/deploy.tar.gz -C ~/deploy-this
+            # If a directory named deploy.tar.gz exists from a previous failed run,
+            # remove it so extraction can create the file instead.
+            if [ -d ~/deploy.tar.gz ]; then
+              rm -rf ~/deploy.tar.gz
+            fi
+            # Ensure the uploaded artifact is a regular file before extracting.
+            if [ -f ~/deploy.tar.gz ]; then
+              tar -xzf ~/deploy.tar.gz -C ~/deploy-this
+            else
+              echo "Error: ~/deploy.tar.gz is missing or not a regular file"
+              ls -la ~
+              exit 1
+            fi
 
             # Install Node if missing (uses NodeSource for Node 18 LTS)
             if ! command -v node >/dev/null 2>&1; then
