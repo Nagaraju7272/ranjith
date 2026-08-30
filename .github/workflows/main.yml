@@ -57,55 +57,46 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.EC2_PORT || '22' }}
           script: |
-            set -e
+            set -euo pipefail
 
-            export HOME="${HOME:-/home/${USER:-ubuntu}}"
-            mkdir -p "$HOME"
-            cd "$HOME"
+            export HOME="/home/${{ secrets.EC2_USER }}"
+            export PM2_HOME="$HOME/.pm2"
+            mkdir -p "$HOME" "$PM2_HOME" "$HOME/deploy-this"
 
-            mkdir -p "$HOME/deploy-this"
+            rm -rf "$HOME/deploy-this"
+            rm -f "$HOME/deploy-"*.tar.gz
 
             echo "Extracting artifact..."
             tar -xzf "$HOME/deploy-${{ github.run_id }}.tar.gz" -C "$HOME/deploy-this"
 
-            # Install Node if missing
             if ! command -v node >/dev/null 2>&1; then
               curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
               sudo apt-get update
               sudo apt-get install -y nodejs
             fi
 
-            # Install PM2 if missing
             if ! command -v pm2 >/dev/null 2>&1; then
               sudo npm install -g pm2
             fi
 
-            echo "Serving frontend via Express (no nginx)"
-
-            # Ensure no stale process is holding the app port
+            echo "Ensuring app port is free..."
             if command -v fuser >/dev/null 2>&1; then
               sudo fuser -k 5000/tcp || true
             fi
 
-            # Remove stale PM2 app state before start
             if pm2 describe deploy-this >/dev/null 2>&1; then
               pm2 delete deploy-this || true
             fi
 
-            # Install dependencies from a guaranteed-valid working directory
             cd "$HOME/deploy-this/server"
             npm ci --production
 
-            # Start with explicit working directory to avoid pm2 uv_cwd errors
-            PORT=5000 pm2 start index.js --name deploy-this --cwd "$HOME/deploy-this/server" --watch false
+            echo "Starting app directly via PM2..."
+            PORT=5000 NODE_ENV=production pm2 start index.js --name deploy-this --cwd "$HOME/deploy-this/server" --watch false
 
             pm2 save
-            sudo pm2 startup systemd -u $USER --hp $HOME || true
+            sudo env PATH="$PATH" PM2_HOME="$PM2_HOME" pm2 startup systemd -u ${{ secrets.EC2_USER }} --hp "$HOME" || true
 
-            echo "PM2 process list:"
+            echo "PM2 status:"
             pm2 list
-
-            echo "Last app logs:"
-            pm2 logs deploy-this --lines 50 --nostream || true
-
             echo "Deployment successful!"
