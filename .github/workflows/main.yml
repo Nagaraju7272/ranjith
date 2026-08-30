@@ -78,18 +78,30 @@ jobs:
 
             echo "Serving frontend via Express (no nginx)"
 
-            cd ~/deploy-this/server
+            # Ensure no stale process is holding the app port
+            if command -v fuser >/dev/null 2>&1; then
+              sudo fuser -k 5000/tcp || true
+            fi
 
+            # Remove stale PM2 app state before start
+            if pm2 describe deploy-this >/dev/null 2>&1; then
+              pm2 delete deploy-this || true
+            fi
+
+            # Install dependencies
+            cd ~/deploy-this/server
             npm ci --production
 
-            # Restart or start app
-            if pm2 describe deploy-this >/dev/null 2>&1; then
-              pm2 restart deploy-this
-            else
-              pm2 start index.js --name deploy-this
-            fi
+            # Start with explicit port and no stale process left behind
+            PORT=5000 pm2 start index.js --name deploy-this --watch false
 
             pm2 save
             sudo pm2 startup systemd -u $USER --hp $HOME || true
+
+            echo "PM2 process list:"
+            pm2 list
+
+            echo "Last app logs:"
+            pm2 logs deploy-this --lines 50 --nostream || true
 
             echo "Deployment successful!"
