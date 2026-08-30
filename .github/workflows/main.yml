@@ -67,8 +67,8 @@ jobs:
             ls -la "$HOME"
 
             echo "Cleaning old deployment state..."
-            rm -rf "$HOME/deploy-this"
-            rm -f "$HOME/deploy-"*.tar.gz
+            rm -rf "$HOME/deploy-this" "$HOME/deploy.tar.gz"
+            find "$HOME" -maxdepth 1 -type f -name 'deploy-*.tar.gz' -delete || true
 
             echo "Looking for uploaded archive..."
             ls -la "$HOME" | grep "deploy-.*tar.gz" || true
