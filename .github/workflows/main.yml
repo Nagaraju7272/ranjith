@@ -47,7 +47,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.EC2_PORT || '22' }}
           source: "deploy-${{ github.run_id }}.tar.gz"
-          target: "~/"
+          target: "/home/${{ secrets.EC2_USER }}/"
 
       - name: Deploy on EC2
         uses: appleboy/ssh-action@v0.1.10
@@ -63,10 +63,22 @@ jobs:
             export PM2_HOME="$HOME/.pm2"
             mkdir -p "$HOME" "$PM2_HOME" "$HOME/deploy-this"
 
+            echo "Checking remote home directory..."
+            ls -la "$HOME"
+
+            echo "Cleaning old deployment state..."
             rm -rf "$HOME/deploy-this"
             rm -f "$HOME/deploy-"*.tar.gz
 
+            echo "Looking for uploaded archive..."
+            ls -la "$HOME" | grep "deploy-.*tar.gz" || true
+
             echo "Extracting artifact..."
+            if [ ! -f "$HOME/deploy-${{ github.run_id }}.tar.gz" ]; then
+              echo "ERROR: artifact not found on remote host: $HOME/deploy-${{ github.run_id }}.tar.gz"
+              find "$HOME" -maxdepth 1 -type f -name '*.tar.gz' -ls || true
+              exit 1
+            fi
             tar -xzf "$HOME/deploy-${{ github.run_id }}.tar.gz" -C "$HOME/deploy-this"
 
             if ! command -v node >/dev/null 2>&1; then
