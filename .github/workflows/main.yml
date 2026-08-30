@@ -7,6 +7,7 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,22 +25,32 @@ jobs:
 
       - name: Prepare artifact
         run: |
-          # Create a tarball containing server and the built client
-          tar -czf deploy.tar.gz server/ client/dist/
+          tar -czf deploy-${{ github.run_id }}.tar.gz server/ client/dist/
 
-      - name: Copy artifact to EC2
-        uses: appleboy/scp-action@master
+      # ✅ CLEANUP BEFORE SCP (fixes your error)
+      - name: Cleanup old files on EC2
+        uses: appleboy/ssh-action@v0.1.10
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.EC2_PORT || '22' }}
-          source: "deploy.tar.gz"
-          # upload into the home directory so the remote file is ~/deploy.tar.gz
+          script: |
+            rm -rf ~/deploy-*.tar.gz
+            rm -rf ~/deploy-this
+
+      - name: Copy artifact to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.EC2_PORT || '22' }}
+          source: "deploy-${{ github.run_id }}.tar.gz"
           target: "~/"
 
       - name: Deploy on EC2
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@v0.1.10
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
@@ -47,43 +58,38 @@ jobs:
           port: ${{ secrets.EC2_PORT || '22' }}
           script: |
             set -e
-            mkdir -p ~/deploy-this
-            # If a directory named deploy.tar.gz exists from a previous failed run,
-            # remove it so extraction can create the file instead.
-            if [ -d ~/deploy.tar.gz ]; then
-              rm -rf ~/deploy.tar.gz
-            fi
-            # Ensure the uploaded artifact is a regular file before extracting.
-            if [ -f ~/deploy.tar.gz ]; then
-              tar -xzf ~/deploy.tar.gz -C ~/deploy-this
-            else
-              echo "Error: ~/deploy.tar.gz is missing or not a regular file"
-              ls -la ~
-              exit 1
-            fi
 
-            # Install Node if missing (uses NodeSource for Node 18 LTS)
+            mkdir -p ~/deploy-this
+
+            echo "Extracting artifact..."
+            tar -xzf ~/deploy-${{ github.run_id }}.tar.gz -C ~/deploy-this
+
+            # Install Node if missing
             if ! command -v node >/dev/null 2>&1; then
               curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
               sudo apt-get update
               sudo apt-get install -y nodejs
             fi
 
-            # Ensure pm2 is available
+            # Install PM2 if missing
             if ! command -v pm2 >/dev/null 2>&1; then
               sudo npm install -g pm2
             fi
 
-            # No nginx: the Express server will serve the built client from client/dist
-            echo "No nginx configuration required — serving static from server via Express"
+            echo "Serving frontend via Express (no nginx)"
 
-            # Install server dependencies and start with pm2
             cd ~/deploy-this/server
+
             npm ci --production
+
+            # Restart or start app
             if pm2 describe deploy-this >/dev/null 2>&1; then
               pm2 restart deploy-this
             else
               pm2 start index.js --name deploy-this
             fi
+
             pm2 save
             sudo pm2 startup systemd -u $USER --hp $HOME || true
+
+            echo "Deployment successful!"
