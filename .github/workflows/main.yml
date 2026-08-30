@@ -1,114 +1,60 @@
-name: Build and Deploy to EC2
+- name: Deploy on EC2
+  uses: appleboy/ssh-action@v0.1.10
+  with:
+    host: ${{ secrets.EC2_HOST }}
+    username: ${{ secrets.EC2_USER }}
+    key: ${{ secrets.SSH_PRIVATE_KEY }}
+    port: ${{ secrets.EC2_PORT || '22' }}
+    script: |
+      set -euo pipefail
 
-on:
-  push:
-    branches: [ main ]
+      export HOME="/home/${{ secrets.EC2_USER }}"
+      export PM2_HOME="$HOME/.pm2"
+      mkdir -p "$HOME/deploy-this"
 
-jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
+      echo "Checking remote home directory..."
+      ls -la "$HOME"
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      echo "Cleaning old deployment folder only..."
+      rm -rf "$HOME/deploy-this"
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
+      echo "Looking for uploaded archive..."
+      ls -la "$HOME" | grep "deploy-.*tar.gz" || true
 
-      - name: Install & Build Client
-        working-directory: ./client
-        run: |
-          npm ci
-          npm run build
+      echo "Extracting artifact..."
+      if [ ! -f "$HOME/deploy-${{ github.run_id }}.tar.gz" ]; then
+        echo "ERROR: artifact not found!"
+        ls -la "$HOME"
+        exit 1
+      fi
 
-      - name: Prepare artifact
-        run: |
-          tar -czf deploy-${{ github.run_id }}.tar.gz server/ client/dist/
+      tar -xzf "$HOME/deploy-${{ github.run_id }}.tar.gz" -C "$HOME/deploy-this"
 
-      # ✅ CLEANUP BEFORE SCP (fixes your error)
-      - name: Cleanup old files on EC2
-        uses: appleboy/ssh-action@v0.1.10
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.EC2_PORT || '22' }}
-          script: |
-            rm -rf ~/deploy-*.tar.gz
-            rm -rf ~/deploy-this
+      # Install Node if missing
+      if ! command -v node >/dev/null 2>&1; then
+        curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+        sudo apt-get update
+        sudo apt-get install -y nodejs
+      fi
 
-      - name: Copy artifact to EC2
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.EC2_PORT || '22' }}
-          source: "deploy-${{ github.run_id }}.tar.gz"
-          target: "/home/${{ secrets.EC2_USER }}/"
+      # Install PM2 if missing
+      if ! command -v pm2 >/dev/null 2>&1; then
+        sudo npm install -g pm2
+      fi
 
-      - name: Deploy on EC2
-        uses: appleboy/ssh-action@v0.1.10
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.EC2_PORT || '22' }}
-          script: |
-            set -euo pipefail
+      echo "Freeing port 5000..."
+      sudo fuser -k 5000/tcp || true
 
-            export HOME="/home/${{ secrets.EC2_USER }}"
-            export PM2_HOME="$HOME/.pm2"
-            mkdir -p "$HOME" "$PM2_HOME" "$HOME/deploy-this"
+      pm2 delete deploy-this || true
 
-            echo "Checking remote home directory..."
-            ls -la "$HOME"
+      cd "$HOME/deploy-this/server"
+      npm ci --production
 
-            echo "Cleaning old deployment state..."
-            rm -rf "$HOME/deploy-this" "$HOME/deploy.tar.gz"
-            find "$HOME" -maxdepth 1 -type f -name 'deploy-*.tar.gz' -delete || true
+      echo "Starting app..."
+      PORT=5000 NODE_ENV=production pm2 start index.js --name deploy-this
 
-            echo "Looking for uploaded archive..."
-            ls -la "$HOME" | grep "deploy-.*tar.gz" || true
+      pm2 save
+      sudo env PATH="$PATH" PM2_HOME="$PM2_HOME" pm2 startup systemd -u ${{ secrets.EC2_USER }} --hp "$HOME" || true
 
-            echo "Extracting artifact..."
-            if [ ! -f "$HOME/deploy-${{ github.run_id }}.tar.gz" ]; then
-              echo "ERROR: artifact not found on remote host: $HOME/deploy-${{ github.run_id }}.tar.gz"
-              find "$HOME" -maxdepth 1 -type f -name '*.tar.gz' -ls || true
-              exit 1
-            fi
-            tar -xzf "$HOME/deploy-${{ github.run_id }}.tar.gz" -C "$HOME/deploy-this"
-
-            if ! command -v node >/dev/null 2>&1; then
-              curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-              sudo apt-get update
-              sudo apt-get install -y nodejs
-            fi
-
-            if ! command -v pm2 >/dev/null 2>&1; then
-              sudo npm install -g pm2
-            fi
-
-            echo "Ensuring app port is free..."
-            if command -v fuser >/dev/null 2>&1; then
-              sudo fuser -k 5000/tcp || true
-            fi
-
-            if pm2 describe deploy-this >/dev/null 2>&1; then
-              pm2 delete deploy-this || true
-            fi
-
-            cd "$HOME/deploy-this/server"
-            npm ci --production
-
-            echo "Starting app directly via PM2..."
-            PORT=5000 NODE_ENV=production pm2 start index.js --name deploy-this --cwd "$HOME/deploy-this/server" --watch false
-
-            pm2 save
-            sudo env PATH="$PATH" PM2_HOME="$PM2_HOME" pm2 startup systemd -u ${{ secrets.EC2_USER }} --hp "$HOME" || true
-
-            echo "PM2 status:"
-            pm2 list
-            echo "Deployment successful!"
+      echo "PM2 status:"
+      pm2 list
