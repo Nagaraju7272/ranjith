@@ -1,60 +1,104 @@
-- name: Deploy on EC2
-  uses: appleboy/ssh-action@v0.1.10
-  with:
-    host: ${{ secrets.EC2_HOST }}
-    username: ${{ secrets.EC2_USER }}
-    key: ${{ secrets.SSH_PRIVATE_KEY }}
-    port: ${{ secrets.EC2_PORT || '22' }}
-    script: |
-      set -euo pipefail
+name: Build and Deploy to EC2
 
-      export HOME="/home/${{ secrets.EC2_USER }}"
-      export PM2_HOME="$HOME/.pm2"
-      mkdir -p "$HOME/deploy-this"
+on:
+  push:
+    branches: [ main ]
 
-      echo "Checking remote home directory..."
-      ls -la "$HOME"
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
 
-      echo "Cleaning old deployment folder only..."
-      rm -rf "$HOME/deploy-this"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      echo "Looking for uploaded archive..."
-      ls -la "$HOME" | grep "deploy-.*tar.gz" || true
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
 
-      echo "Extracting artifact..."
-      if [ ! -f "$HOME/deploy-${{ github.run_id }}.tar.gz" ]; then
-        echo "ERROR: artifact not found!"
-        ls -la "$HOME"
-        exit 1
-      fi
+      - name: Install & Build Client
+        working-directory: ./client
+        run: |
+          npm ci
+          npm run build
 
-      tar -xzf "$HOME/deploy-${{ github.run_id }}.tar.gz" -C "$HOME/deploy-this"
+      - name: Prepare artifact
+        run: |
+          tar -czf deploy-${{ github.run_id }}.tar.gz server/ client/dist/
 
-      # Install Node if missing
-      if ! command -v node >/dev/null 2>&1; then
-        curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-        sudo apt-get update
-        sudo apt-get install -y nodejs
-      fi
+      # ✅ Clean ONLY old folders (NOT tar file)
+      - name: Cleanup old deployment folder on EC2
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.EC2_PORT || '22' }}
+          script: |
+            rm -rf ~/deploy-this
 
-      # Install PM2 if missing
-      if ! command -v pm2 >/dev/null 2>&1; then
-        sudo npm install -g pm2
-      fi
+      - name: Copy artifact to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.EC2_PORT || '22' }}
+          source: "deploy-${{ github.run_id }}.tar.gz"
+          target: "~/"
 
-      echo "Freeing port 5000..."
-      sudo fuser -k 5000/tcp || true
+      - name: Deploy on EC2
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.EC2_PORT || '22' }}
+          script: |
+            set -e
 
-      pm2 delete deploy-this || true
+            echo "📁 Checking files in home directory"
+            ls -la ~
 
-      cd "$HOME/deploy-this/server"
-      npm ci --production
+            echo "📦 Creating deployment folder"
+            mkdir -p ~/deploy-this
 
-      echo "Starting app..."
-      PORT=5000 NODE_ENV=production pm2 start index.js --name deploy-this
+            echo "📦 Extracting artifact"
+            if [ ! -f ~/deploy-${{ github.run_id }}.tar.gz ]; then
+              echo "❌ ERROR: Artifact not found!"
+              exit 1
+            fi
 
-      pm2 save
-      sudo env PATH="$PATH" PM2_HOME="$PM2_HOME" pm2 startup systemd -u ${{ secrets.EC2_USER }} --hp "$HOME" || true
+            tar -xzf ~/deploy-${{ github.run_id }}.tar.gz -C ~/deploy-this
 
-      echo "PM2 status:"
-      pm2 list
+            # Install Node if not installed
+            if ! command -v node >/dev/null 2>&1; then
+              curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+              sudo apt-get update
+              sudo apt-get install -y nodejs
+            fi
+
+            # Install PM2 if not installed
+            if ! command -v pm2 >/dev/null 2>&1; then
+              sudo npm install -g pm2
+            fi
+
+            echo "🧹 Freeing port 5000"
+            sudo fuser -k 5000/tcp || true
+
+            echo "🔄 Restarting app"
+            pm2 delete deploy-this || true
+
+            cd ~/deploy-this/server
+            npm ci --production
+
+            PORT=5000 NODE_ENV=production pm2 start index.js --name deploy-this
+
+            pm2 save
+            sudo pm2 startup systemd -u $USER --hp $HOME || true
+
+            echo "📊 PM2 Status"
+            pm2 list
+
+            echo "✅ Deployment completed successfully!"
