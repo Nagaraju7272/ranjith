@@ -35,7 +35,8 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.EC2_PORT || '22' }}
           source: "deploy.tar.gz"
-          target: "~/deploy.tar.gz"
+          # upload into the home directory so the remote file is ~/deploy.tar.gz
+          target: "~/"
 
       - name: Deploy on EC2
         uses: appleboy/ssh-action@master
